@@ -31,6 +31,8 @@ endif()
 file(GLOB sources "*.cpp" "*.cu")
 file(GLOB headers "*.h" "*.cuh")
 
+file(GLOB headers "*.h" "*.cuh")
+
 cuda_add_library(ethash-cuda STATIC ${sources} ${headers})
 target_link_libraries(ethash-cuda ethcore ethash::ethash Boost::thread)
 target_include_directories(ethash-cuda PUBLIC ${CUDA_INCLUDE_DIRS})
