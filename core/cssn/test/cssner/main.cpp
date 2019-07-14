@@ -334,6 +334,9 @@ public:
         app.add_set(
             "--cuda-block-size,--cu-block-size", m_CUSettings.blockSize, {32, 64, 128, 256}, "", true);
 
+        app.add_set(
+            "--cuda-parallel-hash,--cu-parallel-hash", m_CUSettings.parallelHash, {1, 2, 4, 8}, "", true);
+
         string sched = "sync";
         app.add_set(
             "--cuda-schedule,--cu-schedule", sched, {"auto", "spin", "yield", "sync"}, "", true);
@@ -898,7 +901,7 @@ public:
                  << "                        Set the local work size multiplier" << endl
                  << "    --cl-nobin          FLAG" << endl
                  << "                        Use openCL kernel. Do not load binary kernel" << endl
-                 << "    --cl-noexit         FLAG" << endl
+                 << "    --cl-noexit`        FLAG" << endl
                  << "                        Don't use fast exit algorithm" << endl;
         }
 
