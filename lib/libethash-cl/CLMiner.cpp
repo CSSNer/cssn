@@ -374,7 +374,6 @@ void CLMiner::workLoop()
                 m_searchKernel.setArg(2, m_dag[0]);           // Supply DAG buffer to kernel.
                 m_searchKernel.setArg(3, m_dagItems);
                 m_searchKernel.setArg(5, target);
-                m_searchKernel.setArg(6, 0xffffffff);
 
 #ifdef DEV_BUILD
                 if (g_logOptions & LOG_SWITCH)
@@ -402,14 +401,11 @@ void CLMiner::workLoop()
                         m_lastNonce = nonce;
                         h256 mix;
                         memcpy(mix.data(), (char*)results.rslt[i].mix, sizeof(results.rslt[i].mix));
-                        auto sol = Solution{
-                            nonce, mix, current, std::chrono::steady_clock::now(), m_index};
 
-                        cllog << EthWhite << "Job: " << w.header.abridged() << " Sol: "
-                              << toHex(sol.nonce, HexPrefix::Add) << EthReset;
-
-                        Farm::f().submitProof(sol);
-
+                        Farm::f().submitProof(Solution{
+                            nonce, mix, current, std::chrono::steady_clock::now(), m_index});
+                        cllog << EthWhite << "Job: " << current.header.abridged() << " Sol: 0x"
+                              << toHex(nonce) << EthReset;
                     }
                 }
             }
@@ -439,7 +435,7 @@ void CLMiner::kick_miner()
 {
     // Memory for abort Cannot be static because crashes on macOS.
     const uint32_t one = 1;
-    if (m_abortqueue.size() && !m_settings.noExit)
+    if (!m_settings.noExit && !m_abortqueue.empty())
         m_abortqueue[0].enqueueWriteBuffer(
             m_searchBuffer[0], CL_TRUE, offsetof(SearchResults, abort), sizeof(one), &one);
 
@@ -460,7 +456,7 @@ void CLMiner::enumDevices(std::map<string, DeviceDescriptor>& _DevicesCollection
         ClPlatformTypeEnum platformType = ClPlatformTypeEnum::Unknown;
         if (platformName == "AMD Accelerated Parallel Processing")
             platformType = ClPlatformTypeEnum::Amd;
-        else if (platformName == "Clover")
+        else if (platformName == "Clover" || platformName == "Intel Gen OCL Driver")
             platformType = ClPlatformTypeEnum::Clover;
         else if (platformName == "NVIDIA CUDA")
             platformType = ClPlatformTypeEnum::Nvidia;
@@ -871,7 +867,6 @@ bool CLMiner::initEpoch_internal()
         m_searchKernel.setArg(1, m_header[0]);
         m_searchKernel.setArg(2, m_dag[0]);
         m_searchKernel.setArg(3, m_dagItems);
-        m_searchKernel.setArg(6, ~0u);
 
         // create mining buffers
         ETHCL_LOG("Creating mining buffer");
@@ -881,7 +876,6 @@ bool CLMiner::initEpoch_internal()
         m_dagKernel.setArg(1, m_light[0]);
         m_dagKernel.setArg(2, m_dag[0]);
         m_dagKernel.setArg(3, (uint32_t)(m_epochContext.lightSize / 64));
-        m_dagKernel.setArg(4, ~0u);
 
         const uint32_t workItems = m_dagItems * 2;  // GPU computes partial 512-bit DAG items.
 
