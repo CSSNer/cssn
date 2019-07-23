@@ -1,71 +1,90 @@
 /*
-This file is part of ethminer.
+This file is part of cpp-ethereum.
 
-ethminer is free software: you can redistribute it and/or modify
+cpp-ethereum is free software: you can redistribute it and/or modify
 it under the terms of the GNU General Public License as published by
 the Free Software Foundation, either version 3 of the License, or
 (at your option) any later version.
 
-ethminer is distributed in the hope that it will be useful,
+cpp-ethereum is distributed in the hope that it will be useful,
 but WITHOUT ANY WARRANTY; without even the implied warranty of
 MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
 GNU General Public License for more details.
 
 You should have received a copy of the GNU General Public License
-along with ethminer.  If not, see <http://www.gnu.org/licenses/>.
+along with cpp-ethereum.  If not, see <http://www.gnu.org/licenses/>.
 */
-
+/** @file CUDAMiner.h
+* @author Gav Wood <i@gavwood.com>
+* @date 2014
+*
+* Determines the PoW algorithm.
+*/
 #pragma once
-
-#include "ethash_cuda_miner_kernel.h"
 
 #include <libdevcore/Worker.h>
 #include <libethcore/EthashAux.h>
 #include <libethcore/Miner.h>
-
-#include <functional>
+#include "ethash_cuda_miner.h"
 
 namespace dev
 {
 namespace eth
 {
-class CUDAMiner : public Miner
-{
-public:
-    CUDAMiner(unsigned _index, CUSettings _settings, DeviceDescriptor& _device);
-    ~CUDAMiner() override;
+class EthashCUDAHook;
 
-    static int getNumDevices();
-    static void enumDevices(std::map<string, DeviceDescriptor>& _DevicesCollection);
+	class CUDAMiner: public Miner
+	{
+		friend class dev::eth::EthashCUDAHook;
 
-    void search(
-        uint8_t const* header, uint64_t target, uint64_t _startN, const dev::eth::WorkPackage& w);
+	public:
+		CUDAMiner(FarmFace& _farm, unsigned _index);
+		~CUDAMiner() override;
 
-protected:
-    bool initDevice() override;
+		static unsigned instances()
+		{
+			return s_numInstances > 0 ? s_numInstances : 1;
+		}
+		static unsigned getNumDevices();
+		static void listDevices();
+		static void setParallelHash(unsigned _parallelHash);
+		static bool configureGPU(
+			unsigned _blockSize,
+			unsigned _gridSize,
+			unsigned _numStreams,
+			unsigned _scheduleFlag,
+			uint64_t _currentBlock,
+			unsigned _dagLoadMode,
+			unsigned _dagCreateDevice
+			);
+		static void setNumInstances(unsigned _instances)
+		{
+			s_numInstances = std::min<unsigned>(_instances, getNumDevices());
+		}
+		static void setDevices(const unsigned* _devices, unsigned _selectedDeviceCount)
+		{
+			for (unsigned i = 0; i < _selectedDeviceCount; i++)
+			{
+				s_devices[i] = _devices[i];
+			}
+		}
+		HwMonitor hwmon() override;
+	protected:
+		void kickOff() override;
+		void pause() override;
+		void waitPaused() override;
+	private:
+		void workLoop() override;
+		void report(uint64_t _nonce, const WorkPackage& work);
 
-    bool initEpoch_internal() override;
+		bool init(const h256& seed);
 
-    void kick_miner() override;
+		EthashCUDAHook* m_hook = nullptr;
+		ethash_cuda_miner m_miner;
 
-private:
-    atomic<bool> m_new_work = {false};
+		static unsigned s_numInstances;
+		static int s_devices[16];
 
-    void workLoop() override;
-
-    std::vector<volatile Search_results*> m_search_buf;
-    std::vector<cudaStream_t> m_streams;
-    uint64_t m_current_target = 0;
-
-    CUSettings m_settings;
-
-    const uint32_t m_batch_size;
-    const uint32_t m_streams_batch_size;
-
-    uint64_t m_allocated_memory_dag = 0; // dag_size is a uint64_t in EpochContext struct
-    size_t m_allocated_memory_light_cache = 0;
-};
-
-
-}  // namespace eth
-}  // namespace dev
+	};
+}
+}
