@@ -106,8 +106,7 @@ protected:
 	void kick_miner() override;
 
 private:
-	Mutex x_all;
-	volatile bool m_abort = false;
+	bool m_abort = false;
 
 	void workLoop() override;
 
