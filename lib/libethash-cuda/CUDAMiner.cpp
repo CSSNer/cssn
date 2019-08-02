@@ -42,8 +42,7 @@ struct CUDAChannel: public LogChannel
 
 CUDAMiner::CUDAMiner(FarmFace& _farm, unsigned _index) :
 	Miner("cuda-", _farm, _index),
-	m_light(getNumDevices())
-{}
+	m_light(getNumDevices()) {}
 
 CUDAMiner::~CUDAMiner()
 {
@@ -53,13 +52,11 @@ CUDAMiner::~CUDAMiner()
 
 bool CUDAMiner::init(const h256& seed)
 {
+	// take local copy of work since it may end up being overwritten by kickOff/pause.
 	try {
-		if (s_dagLoadMode == DAG_LOAD_MODE_SEQUENTIAL)
-			while (s_dagLoadIndex < index)
-				this_thread::sleep_for(chrono::milliseconds(100));
 		unsigned device = s_devices[index] > -1 ? s_devices[index] : index;
 
-		cnote << "Initialising miner " << index;
+		cnote << "Initialising miner...";
 
 		EthashAux::LightType light;
 		light = EthashAux::light(seed);
@@ -97,7 +94,6 @@ void CUDAMiner::workLoop()
 	{
 		while(true)
 		{
-	                // take local copy of work since it may end up being overwritten.
 			const WorkPackage w = work();
 
 			if (current.header != w.header || current.seed != w.seed)
@@ -138,8 +134,9 @@ void CUDAMiner::workLoop()
 
 void CUDAMiner::kick_miner()
 {
-	if (!m_abort)
-		m_abort = true;
+	bool f = false;
+	// weak if ok here. If it fails it's because it was already true!
+	m_abort.compare_exchange_weak(f, true);
 }
 
 void CUDAMiner::setNumInstances(unsigned _instances)
@@ -468,8 +465,7 @@ void CUDAMiner::search(
 	{
 		if (initialize)
 		{
-			random_device engine;
-			m_current_nonce = uniform_int_distribution<uint64_t>()(engine);
+			m_current_nonce = get_start_nonce();
 			m_current_index = 0;
 			CUDA_SAFE_CALL(cudaDeviceSynchronize());
 			for (unsigned int i = 0; i < s_numStreams; i++)
@@ -517,9 +513,14 @@ void CUDAMiner::search(
 				}
 			}
 			addHashCount(batch_size);
-			if (m_abort || shouldStop())
+			bool t = true;
+			if (m_abort.compare_exchange_weak(t, false))
+				break;
+			if (shouldStop())
 			{
-				m_abort = false;
+				// shutting down. don't want to get stuck here
+				// use weak exchange.
+				m_abort.compare_exchange_weak(t, false);
 				break;
 			}
 		}
