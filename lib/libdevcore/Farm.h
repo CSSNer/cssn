@@ -259,7 +259,7 @@ public:
 		return m_solutionStats;
 	}
 
-	void failedSolution() {
+	void failedSolution() override {
 		m_solutionStats.failed();
 	}
 
@@ -285,7 +285,7 @@ public:
 		}
 	}
 
-	using SolutionFound = std::function<bool(Solution const&)>;
+	using SolutionFound = std::function<void(Solution const&)>;
 	using MinerRestart = std::function<void()>;
 
 	/**
@@ -326,7 +326,7 @@ public:
 		return m_pool_addresses;
 	}
 
-	uint64_t get_nonce_scrambler()
+	uint64_t get_nonce_scrambler() override
 	{
 		return m_nonce_scrambler;
 	}
@@ -338,10 +338,10 @@ private:
 	 * @param _wp The WorkPackage that the Solution is for.
 	 * @return true iff the solution was good (implying that mining should be .
 	 */
-	bool submitProof(Solution const& _s) override
+	void submitProof(Solution const& _s) override
 	{
 		assert(m_onSolutionFound);
-		return m_onSolutionFound(_s);
+		m_onSolutionFound(_s);
 	}
 
 	mutable Mutex x_minerWork;
