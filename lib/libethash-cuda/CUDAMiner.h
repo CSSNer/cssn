@@ -30,9 +30,6 @@ along with cpp-ethereum.  If not, see <http://www.gnu.org/licenses/>.
 #include "ethash_cuda_miner_kernel.h"
 #include "libethash/internal.h"
 
-#define SHUFFLE_MIN_VER 300 //__CUDA_ARCH_
-#define SHUFFLE_DEPRECATED 9000 //CUDA_VERSION
-
 namespace dev
 {
 namespace eth
@@ -59,7 +56,8 @@ public:
 		unsigned _scheduleFlag,
 		uint64_t _currentBlock,
 		unsigned _dagLoadMode,
-		unsigned _dagCreateDevice
+		unsigned _dagCreateDevice,
+		bool _noeval
 		);
 	static void setNumInstances(unsigned _instances);
 	static void setDevices(const unsigned* _devices, unsigned _selectedDeviceCount);
@@ -71,7 +69,8 @@ public:
 		unsigned _gridSize,
 		unsigned _numStreams,
 		unsigned _scheduleFlag,
-		uint64_t _currentBlock
+		uint64_t _currentBlock,
+		bool _noeval
 		);
 
 	static void cuda_setParallelHash(unsigned _parallelHash);
@@ -117,7 +116,6 @@ private:
 	uint64_t m_current_nonce;
 	uint64_t m_starting_nonce;
 	uint64_t m_current_index;
-	uint32_t m_sharedBytes;
 
 	///Constants on GPU
 	hash128_t* m_dag = nullptr;
@@ -125,7 +123,7 @@ private:
 	uint32_t m_dag_size = -1;
 	uint32_t m_device_num;
 
-	volatile uint32_t ** m_search_buf;
+	volatile search_results** m_search_buf;
 	cudaStream_t  * m_streams;
 
 	/// The local work size for the search
@@ -143,6 +141,8 @@ private:
 
 	static unsigned s_numInstances;
 	static int s_devices[16];
+
+	static bool s_noeval;
 };
 
 

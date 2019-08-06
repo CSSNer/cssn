@@ -42,8 +42,7 @@ struct CUDAChannel: public LogChannel
 
 CUDAMiner::CUDAMiner(FarmFace& _farm, unsigned _index) :
 	Miner("cuda-", _farm, _index),
-	m_light(getNumDevices())
-{}
+	m_light(getNumDevices()) {}
 
 CUDAMiner::~CUDAMiner()
 {
@@ -136,8 +135,7 @@ void CUDAMiner::workLoop()
 
 void CUDAMiner::kick_miner()
 {
-	if (!m_abort)
-		m_abort = true;
+	m_abort.store(true, std::memory_order_relaxed);
 }
 
 void CUDAMiner::setNumInstances(unsigned _instances)
@@ -174,18 +172,19 @@ void CUDAMiner::listDevices()
 {
 	try
 	{
-		string outString = "\nListing CUDA devices.\nFORMAT: [deviceID] deviceName\n";
+		cout << "\nListing CUDA devices.\nFORMAT: [deviceID] deviceName\n";
 		int numDevices = getNumDevices();
 		for (int i = 0; i < numDevices; ++i)
 		{
 			cudaDeviceProp props;
 			CUDA_SAFE_CALL(cudaGetDeviceProperties(&props, i));
 
-			outString += "[" + to_string(i) + "] " + string(props.name) + "\n";
-			outString += "\tCompute version: " + to_string(props.major) + "." + to_string(props.minor) + "\n";
-			outString += "\tcudaDeviceProp::totalGlobalMem: " + to_string(props.totalGlobalMem) + "\n";
+			cout << "[" + to_string(i) + "] " + string(props.name) + "\n";
+			cout << "\tCompute version: " + to_string(props.major) + "." + to_string(props.minor) + "\n";
+			cout << "\tcudaDeviceProp::totalGlobalMem: " + to_string(props.totalGlobalMem) + "\n";
+			cout << "\tPci: " << setw(4) << setfill('0') << hex << props.pciDomainID << ':' << setw(2)
+				<< props.pciBusID << ':' << setw(2) << props.pciDeviceID << '\n';
 		}
-		std::cout << outString;
 	}
 	catch(std::runtime_error const& err)
 	{
@@ -213,7 +212,8 @@ bool CUDAMiner::configureGPU(
 	unsigned _scheduleFlag,
 	uint64_t _currentBlock,
 	unsigned _dagLoadMode,
-	unsigned _dagCreateDevice
+	unsigned _dagCreateDevice,
+	bool _noeval
 	)
 {
 	s_dagLoadMode = _dagLoadMode;
@@ -226,7 +226,8 @@ bool CUDAMiner::configureGPU(
 		_gridSize,
 		_numStreams,
 		_scheduleFlag,
-		_currentBlock)
+		_currentBlock,
+		_noeval)
 		)
 	{
 		cout << "No CUDA device with sufficient memory was found. Can't CUDA mine. Remove the -U argument" << endl;
@@ -251,7 +252,8 @@ bool CUDAMiner::cuda_configureGPU(
 	unsigned _gridSize,
 	unsigned _numStreams,
 	unsigned _scheduleFlag,
-	uint64_t _currentBlock
+	uint64_t _currentBlock,
+	bool _noeval
 	)
 {
 	try
@@ -260,6 +262,7 @@ bool CUDAMiner::cuda_configureGPU(
 		s_gridSize = _gridSize;
 		s_numStreams = _numStreams;
 		s_scheduleFlag = _scheduleFlag;
+		s_noeval = _noeval;
 
 		cudalog << "Using grid size " << s_gridSize << ", block size " << s_blockSize;
 
@@ -297,6 +300,7 @@ unsigned CUDAMiner::s_blockSize = CUDAMiner::c_defaultBlockSize;
 unsigned CUDAMiner::s_gridSize = CUDAMiner::c_defaultGridSize;
 unsigned CUDAMiner::s_numStreams = CUDAMiner::c_defaultNumStreams;
 unsigned CUDAMiner::s_scheduleFlag = 0;
+bool CUDAMiner::s_noeval = false;
 
 bool CUDAMiner::cuda_init(
 	size_t numDevices,
@@ -387,7 +391,7 @@ bool CUDAMiner::cuda_init(
 			{
 				if((m_device_num == dagCreateDevice) || !_cpyToHost){ //if !cpyToHost -> All devices shall generate their DAG
 					cudalog << "Generating DAG for GPU #" << m_device_num << " with dagSize: "
-							<< dagSize <<" gridSize: " << s_gridSize << " &m_streams[0]: " << &m_streams[0];
+							<< dagSize <<" gridSize: " << s_gridSize;
 					ethash_generate_dag(dagSize, s_gridSize, s_blockSize, m_streams[0], m_device_num);
 
 					if (_cpyToHost)
@@ -493,14 +497,16 @@ void CUDAMiner::search(
 					found_count = SEARCH_RESULTS;
 				for (unsigned int j = 0; j < found_count; j++) {
 					nonces[j] = nonce_base + buffer->result[j].gid;
-					mixes[j][0] = buffer->result[j].mix[0];
-					mixes[j][1] = buffer->result[j].mix[1];
-					mixes[j][2] = buffer->result[j].mix[2];
-					mixes[j][3] = buffer->result[j].mix[3];
-					mixes[j][4] = buffer->result[j].mix[4];
-					mixes[j][5] = buffer->result[j].mix[5];
-					mixes[j][6] = buffer->result[j].mix[6];
-					mixes[j][7] = buffer->result[j].mix[7];
+					if (s_noeval) {
+						mixes[j][0] = buffer->result[j].mix[0];
+						mixes[j][1] = buffer->result[j].mix[1];
+						mixes[j][2] = buffer->result[j].mix[2];
+						mixes[j][3] = buffer->result[j].mix[3];
+						mixes[j][4] = buffer->result[j].mix[4];
+						mixes[j][5] = buffer->result[j].mix[5];
+						mixes[j][6] = buffer->result[j].mix[6];
+						mixes[j][7] = buffer->result[j].mix[7];
+					}
 				}
 			}
 		}
@@ -509,15 +515,27 @@ void CUDAMiner::search(
 		{
 			if (found_count)
 				for (uint32_t i = 0; i < found_count; i++)
-					farm.submitProof(
-						Solution{nonces[i],
-						*((const h256 *)mixes[i]),
-						w,
-						m_abort});
+					if (s_noeval)
+						farm.submitProof(Solution{nonces[i], *((const h256 *)mixes[i]), w, m_abort});
+					else
+					{
+						Result r = EthashAux::eval(w.seed, w.header, nonces[i]);
+						if (r.value < w.boundary)
+							farm.submitProof(Solution{nonces[i], r.mixHash, w, m_abort});
+						else
+						{
+							farm.failedSolution();
+							cwarn << "GPU gave incorrect result!";
+						}
+					}
+
 			addHashCount(batch_size);
-			if (m_abort || shouldStop())
+			bool t = true;
+			if (m_abort.compare_exchange_strong(t, false))
+				break;
+			if (shouldStop())
 			{
-				m_abort = false;
+				m_abort.store(false, std::memory_order_relaxed);
 				break;
 			}
 		}
