@@ -1,97 +1,67 @@
-#pragma once
+#ifndef POOL_MANAGER_H_
+#define POOL_MANAGER_H_
 
 #include <iostream>
-
-#include <json/json.h>
-
 #include <libdevcore/Worker.h>
 #include <libethcore/Farm.h>
 #include <libethcore/Miner.h>
 
 #include "PoolClient.h"
-#include "getwork/EthGetworkClient.h"
-#include "stratum/EthStratumClient.h"
-#include "testing/SimulateClient.h"
+#if ETH_DBUS
+#include "DBusInt.h"
+#endif
 
 using namespace std;
 
 namespace dev
 {
-namespace eth
-{
-struct PoolSettings
-{
-    std::vector<std::shared_ptr<URI>> connections;  // List of connection definitions
-    unsigned getWorkPollInterval = 500;             // Interval (ms) between getwork requests
-    unsigned noWorkTimeout = 180;       // If no new jobs in this number of seconds drop connection
-    unsigned noResponseTimeout = 2;     // If no response in this number of seconds drop connection
-    unsigned poolFailoverTimeout = 0;   // Return to primary pool after this number of minutes
-    bool reportHashrate = false;        // Whether or not to report hashrate to pool
-    unsigned hashRateInterval = 60;     // Interval in seconds among hashrate submissions
-    std::string hashRateId =
-        h256::random().hex(HexPrefix::Add);  // Unique identifier for HashRate submission
-    unsigned connectionMaxRetries = 3;  // Max number of connection retries
-    unsigned benchmarkBlock = 0;        // Block number used by SimulateClient to test performances
-};
+	namespace eth
+	{
+		class PoolConnection
+		{
+		public:
+			PoolConnection(string const & host, string const & port, string const & user, string const & pass) : m_host(host), m_port(port), m_user(user), m_pass(pass) {};
+			string host() { return m_host; };
+			string port() { return m_port; };
+			string user() { return m_user; };
+			string pass() { return m_pass; };
+		private:
+			string m_host = "";
+			string m_port = "";
+			string m_user = "";
+			string m_pass = "";
+		};
 
-class PoolManager
-{
-public:
-    PoolManager(PoolSettings _settings);
-    static PoolManager& p() { return *m_this; }
-    void addConnection(std::string _connstring);
-    void addConnection(std::shared_ptr<URI> _uri);
-    Json::Value getConnectionsJson();
-    void setActiveConnection(unsigned int idx);
-    void setActiveConnection(std::string& _connstring);
-    std::shared_ptr<URI> getActiveConnection();
-    void removeConnection(unsigned int idx);
-    void start();
-    void stop();
-    bool isConnected() { return p_client->isConnected(); };
-    bool isRunning() { return m_running; };
-    int getCurrentEpoch();
-    double getCurrentDifficulty();
-    unsigned getConnectionSwitches();
-    unsigned getEpochChanges();
+		class PoolManager : public Worker
+		{
+		public:
+			PoolManager(PoolClient * client, Farm &farm, MinerType const & minerType);
+			void addConnection(string const & host, string const & port, string const & user, string const & pass);
+			void clearConnections();
+			void start();
+			void stop();
+			void setReconnectTries(unsigned const & reconnectTries) { m_reconnectTries = reconnectTries; };
+			bool isConnected() { return p_client->isConnected(); };
 
-private:
-    void rotateConnect();
+		private:
+			unsigned m_hashrateReportingTime = 10;
+			unsigned m_hashrateReportingTimePassed = 0;
 
-    void setClientHandlers();
+			bool m_running = false;
+			void workLoop() override;
+			unsigned m_reconnectTries = 3;
+			unsigned m_reconnectTry = 0;
+			std::vector <PoolConnection> m_connections;
+			unsigned m_activeConnectionIdx = 0;
 
-    void showMiningAt();
+			PoolClient *p_client;
+			Farm &m_farm;
+			MinerType m_minerType;
+			std::chrono::steady_clock::time_point m_submit_time;
+			void tryReconnect();
+		};
+	}
+}
 
-    void setActiveConnectionCommon(unsigned int idx);
+#endif
 
-    PoolSettings m_Settings;
-
-    void failovertimer_elapsed(const boost::system::error_code& ec);
-    void submithrtimer_elapsed(const boost::system::error_code& ec);
-
-    std::atomic<bool> m_running = {false};
-    std::atomic<bool> m_stopping = {false};
-    std::atomic<bool> m_async_pending = {false};
-
-    unsigned m_connectionAttempt = 0;
-
-    std::string m_selectedHost = "";  // Holds host name (and endpoint) of selected connection
-    std::atomic<unsigned> m_connectionSwitches = {0};
-
-    unsigned m_activeConnectionIdx = 0;
-
-    WorkPackage m_currentWp;
-
-    boost::asio::io_service::strand m_io_strand;
-    boost::asio::deadline_timer m_failovertimer;
-    boost::asio::deadline_timer m_submithrtimer;
-
-    std::unique_ptr<PoolClient> p_client = nullptr;
-
-    std::atomic<unsigned> m_epochChanges = {0};
-
-    static PoolManager* m_this;
-};
-
-}  // namespace eth
-}  // namespace dev
