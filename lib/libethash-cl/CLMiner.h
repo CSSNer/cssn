@@ -43,7 +43,7 @@ namespace eth
 
 enum CLKernelName {
 	Stable,
-	Unstable,
+	Experimental,
 };
 
 class CLMiner: public Miner
@@ -59,7 +59,7 @@ public:
 	static const CLKernelName c_defaultKernelName = CLKernelName::Stable;
 
 	CLMiner(FarmFace& _farm, unsigned _index);
-	~CLMiner() override;
+	~CLMiner();
 
 	static unsigned instances() { return s_numInstances > 0 ? s_numInstances : 1; }
 	static unsigned getNumDevices();
