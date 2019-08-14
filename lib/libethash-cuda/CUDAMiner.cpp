@@ -26,9 +26,7 @@ using namespace eth;
 
 unsigned CUDAMiner::s_numInstances = 0;
 
-int CUDAMiner::s_devices[16] = {
-	-1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1
-};
+vector<int> CUDAMiner::s_devices(MAX_MINERS, -1);
 
 struct CUDAChannel: public LogChannel
 {
@@ -92,6 +90,7 @@ void CUDAMiner::workLoop()
 	WorkPackage current;
 	current.header = h256{1u};
 	current.seed = h256{1u};
+
 	try
 	{
 		while(true)
@@ -108,24 +107,29 @@ void CUDAMiner::workLoop()
 					continue;
 				}
 				if (current.seed != w.seed)
-				{
 					if(!init(w.seed))
 						break;
-				}
 				current = w;
 			}
 			uint64_t upper64OfBoundary = (uint64_t)(u64)((u256)current.boundary >> 192);
 			uint64_t startN = current.startNonce;
 			if (current.exSizeBits >= 0)
-				startN = current.startNonce | ((uint64_t)index << (64 - 4 - current.exSizeBits)); // this can support up to 16 devices
+			{
+				// this can support up to 2^c_log2Max_miners devices
+				startN = current.startNonce | ((uint64_t)index << (64 - LOG2_MAX_MINERS - current.exSizeBits));
+			}
 			search(current.header.data(), upper64OfBoundary, (current.exSizeBits >= 0), startN, w);
 
 			// Check if we should stop.
 			if (shouldStop())
-			{
 				break;
-			}
 		}
+	}
+	catch (cuda_runtime_error const& _e)
+	{
+		cwarn << "Fatal GPU error: " << _e.what();
+		cwarn << "Terminating.";
+		exit(-1);
 	}
 	catch (std::runtime_error const& _e)
 	{
@@ -143,7 +147,7 @@ void CUDAMiner::setNumInstances(unsigned _instances)
         s_numInstances = std::min<unsigned>(_instances, getNumDevices());
 }
 
-void CUDAMiner::setDevices(const unsigned* _devices, unsigned _selectedDeviceCount)
+void CUDAMiner::setDevices(const vector<unsigned>& _devices, unsigned _selectedDeviceCount)
 {
         for (unsigned i = 0; i < _selectedDeviceCount; i++)
                 s_devices[i] = _devices[i];
@@ -247,7 +251,7 @@ unsigned const CUDAMiner::c_defaultNumStreams = 2;
 
 bool CUDAMiner::cuda_configureGPU(
 	size_t numDevices,
-	const int* _devices,
+	const vector<int>& _devices,
 	unsigned _blockSize,
 	unsigned _gridSize,
 	unsigned _numStreams,
