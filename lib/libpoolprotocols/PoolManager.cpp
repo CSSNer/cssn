@@ -1,531 +1,175 @@
-#include <chrono>
-
 #include "PoolManager.h"
+#include <chrono>
 
 using namespace std;
 using namespace dev;
 using namespace eth;
 
-PoolManager* PoolManager::m_this = nullptr;
-
-PoolManager::PoolManager(PoolSettings _settings)
-  : m_Settings(std::move(_settings)),
-    m_io_strand(g_io_service),
-    m_failovertimer(g_io_service),
-    m_submithrtimer(g_io_service)
+PoolManager::PoolManager(PoolClient * client, Farm &farm, MinerType const & minerType) : Worker("main"), m_farm(farm), m_minerType(minerType)
 {
-    DEV_BUILD_LOG_PROGRAMFLOW(cnote, "PoolManager::PoolManager() begin");
+	p_client = client;
 
-    m_this = this;
+	p_client->onConnected([&]()
+	{
+		cnote << "Connected to " + m_connections[m_activeConnectionIdx].host();
+		if (!m_farm.isMining())
+		{
+			cnote << "Spinning up miners...";
+			if (m_minerType == MinerType::CL)
+				m_farm.start("opencl", false);
+			else if (m_minerType == MinerType::CUDA)
+				m_farm.start("cuda", false);
+			else if (m_minerType == MinerType::Mixed) {
+				m_farm.start("cuda", false);
+				m_farm.start("opencl", true);
+			}
+		}
+	});
+	p_client->onDisconnected([&]()
+	{
+		cnote << "Disconnected from " + m_connections[m_activeConnectionIdx].host();
+		if (m_running)
+			tryReconnect();
+	});
+	p_client->onWorkReceived([&](WorkPackage const& wp)
+	{
+		m_reconnectTry = 0;
+		m_farm.setWork(wp);
+		cnote << "Received new job #" + wp.header.hex().substr(0, 8) + " from " + m_connections[m_activeConnectionIdx].host();
+	});
+	p_client->onSolutionAccepted([&](bool const& stale)
+	{
+		using namespace std::chrono;
+		auto ms = duration_cast<milliseconds>(steady_clock::now() - m_submit_time);
+		cnote << EthLime "**Accepted" EthReset << (stale ? " (stale)" : "") << " in" << ms.count() << "ms.";
+		m_farm.acceptedSolution(stale);
+	});
+	p_client->onSolutionRejected([&](bool const& stale)
+	{
+		using namespace std::chrono;
+		auto ms = duration_cast<milliseconds>(steady_clock::now() - m_submit_time);
+		cwarn << EthRed "**Rejected" EthReset << (stale ? " (stale)" : "") << " in" << ms.count() << "ms.";
+		m_farm.rejectedSolution(stale);
+	});
 
-    m_currentWp.header = h256();
+	m_farm.onSolutionFound([&](Solution sol)
+	{
+		m_submit_time = std::chrono::steady_clock::now();
 
-    Farm::f().onMinerRestart([&]() {
-        cnote << "Restart miners...";
+		if (sol.stale)
+			cnote << string(EthYellow "Stale nonce 0x") + toHex(sol.nonce) + " submitted to " + m_connections[m_activeConnectionIdx].host();
+		else
+			cnote << string("Nonce 0x") + toHex(sol.nonce) + " submitted to " + m_connections[m_activeConnectionIdx].host();
 
-        if (Farm::f().isMining())
-        {
-            cnote << "Shutting down miners...";
-            Farm::f().stop();
-        }
-
-        cnote << "Spinning up miners...";
-        Farm::f().start();
-    });
-
-    Farm::f().onSolutionFound([&](const Solution& sol) {
-        // Solution should passthrough only if client is
-        // properly connected. Otherwise we'll have the bad behavior
-        // to log nonce submission but receive no response
-
-        if (p_client && p_client->isConnected())
-        {
-            p_client->submitSolution(sol);
-        }
-        else
-        {
-            cnote << string(EthOrange "Solution 0x") + toHex(sol.nonce)
-                  << " wasted. Waiting for connection...";
-        }
-
-        return false;
-    });
-
-
-    DEV_BUILD_LOG_PROGRAMFLOW(cnote, "PoolManager::PoolManager() end");
-}
-
-void PoolManager::setClientHandlers()
-{
-    p_client->onConnected([&]() {
-        {
-
-            // If HostName is already an IP address no need to append the
-            // effective ip address.
-            if (p_client->getConnection()->HostNameType() == dev::UriHostNameType::Dns ||
-                p_client->getConnection()->HostNameType() == dev::UriHostNameType::Basic)
-            {
-                string ep = p_client->ActiveEndPoint();
-                if (!ep.empty())
-                    m_selectedHost = p_client->getConnection()->Host() + ep;
-            }
-
-            cnote << "Established connection to " << m_selectedHost;
-
-            // Reset current WorkPackage
-            m_currentWp.job.clear();
-            m_currentWp.header = h256();
-
-            // Shuffle if needed
-            if (Farm::f().get_ergodicity() == 1U)
-                Farm::f().shuffle();
-
-            // Rough implementation to return to primary pool
-            // after specified amount of time
-            if (m_activeConnectionIdx != 0 && m_Settings.poolFailoverTimeout)
-            {
-                m_failovertimer.expires_from_now(
-                    boost::posix_time::minutes(m_Settings.poolFailoverTimeout));
-                m_failovertimer.async_wait(m_io_strand.wrap(boost::bind(
-                    &PoolManager::failovertimer_elapsed, this, boost::asio::placeholders::error)));
-            }
-            else
-            {
-                m_failovertimer.cancel();
-            }
-        }
-
-        if (!Farm::f().isMining())
-        {
-            cnote << "Spinning up miners...";
-            Farm::f().start();
-        }
-        else if (Farm::f().paused())
-        {
-            cnote << "Resume mining ...";
-            Farm::f().resume();
-        }
-
-        // Activate timing for HR submission
-        if (m_Settings.reportHashrate)
-        {
-            m_submithrtimer.expires_from_now(boost::posix_time::seconds(m_Settings.hashRateInterval));
-            m_submithrtimer.async_wait(m_io_strand.wrap(boost::bind(
-                &PoolManager::submithrtimer_elapsed, this, boost::asio::placeholders::error)));
-        }
-
-        // Signal async operations have completed
-        m_async_pending.store(false, std::memory_order_relaxed);
-
-    });
-
-    p_client->onDisconnected([&]() {
-        cnote << "Disconnected from " << m_selectedHost;
-
-        // Clear current connection
-        p_client->unsetConnection();
-        m_currentWp.header = h256();
-
-        // Stop timing actors
-        m_failovertimer.cancel();
-        m_submithrtimer.cancel();
-
-        if (m_stopping.load(std::memory_order_relaxed))
-        {
-            if (Farm::f().isMining())
-            {
-                cnote << "Shutting down miners...";
-                Farm::f().stop();
-            }
-            m_running.store(false, std::memory_order_relaxed);
-        }
-        else
-        {
-            // Signal we will reconnect async
-            m_async_pending.store(true, std::memory_order_relaxed);
-
-            // Suspend mining and submit new connection request
-            cnote << "No connection. Suspend mining ...";
-            Farm::f().pause();
-            g_io_service.post(m_io_strand.wrap(boost::bind(&PoolManager::rotateConnect, this)));
-        }
-    });
-
-    p_client->onWorkReceived([&](WorkPackage const& wp) {
-
-        // Should not happen !
-        if (!wp)
-            return;
-
-        int _currentEpoch = m_currentWp.epoch;
-        bool newEpoch = (_currentEpoch == -1);
-
-        // In EthereumStratum/2.0.0 epoch number is set in session
-        if (!newEpoch)
-        {
-            if (p_client->getConnection()->StratumMode() == 3)
-                newEpoch = (wp.epoch != m_currentWp.epoch);
-            else
-                newEpoch = (wp.seed != m_currentWp.seed);
-        }
-
-        bool newDiff = (wp.boundary != m_currentWp.boundary);
-
-        m_currentWp = wp;
-
-        if (newEpoch)
-        {
-            m_epochChanges.fetch_add(1, std::memory_order_relaxed);
-
-            // If epoch is valued in workpackage take it
-            if (wp.epoch == -1)
-            {
-                if (m_currentWp.block > 0)
-                    m_currentWp.epoch = m_currentWp.block / 30000;
-                else
-                    m_currentWp.epoch = ethash::find_epoch_number(
-                        ethash::hash256_from_bytes(m_currentWp.seed.data()));
-            }
-        }
-        else
-        {
-            m_currentWp.epoch = _currentEpoch;
-        }
-
-        if (newDiff || newEpoch)
-            showMiningAt();
-
-        cnote << "Job: " EthWhite << m_currentWp.header.abridged()
-              << (m_currentWp.block != -1 ? (" block " + to_string(m_currentWp.block)) : "")
-              << EthReset << " " << m_selectedHost;
-
-        Farm::f().setWork(m_currentWp);
-    });
-
-    p_client->onSolutionAccepted(
-        [&](std::chrono::milliseconds const& _responseDelay, unsigned const& _minerIdx, bool _asStale) {
-            std::stringstream ss;
-            ss << std::setw(4) << std::setfill(' ') << _responseDelay.count() << " ms. "
-               << m_selectedHost;
-            cnote << EthLime "**Accepted" << (_asStale ? " stale": "") << EthReset << ss.str();
-            Farm::f().accountSolution(_minerIdx, SolutionAccountingEnum::Accepted);
-        });
-
-    p_client->onSolutionRejected(
-        [&](std::chrono::milliseconds const& _responseDelay, unsigned const& _minerIdx) {
-            std::stringstream ss;
-            ss << std::setw(4) << std::setfill(' ') << _responseDelay.count() << " ms. "
-               << m_selectedHost;
-            cwarn << EthRed "**Rejected" EthReset << ss.str();
-            Farm::f().accountSolution(_minerIdx, SolutionAccountingEnum::Rejected);
-        });
+		p_client->submitSolution(sol);
+		return false;
+	});
+	m_farm.onMinerRestart([&]() {
+		cwarn << "Miner restart currently not supported!";
+	});
 }
 
 void PoolManager::stop()
 {
-    DEV_BUILD_LOG_PROGRAMFLOW(cnote, "PoolManager::stop() begin");
-    if (m_running.load(std::memory_order_relaxed))
-    {
-        m_async_pending.store(true, std::memory_order_relaxed);
-        m_stopping.store(true, std::memory_order_relaxed);
+	m_running = false;
 
-        if (p_client && p_client->isConnected())
-        {
-            p_client->disconnect();
-            // Wait for async operations to complete
-            while (m_running.load(std::memory_order_relaxed))
-                this_thread::sleep_for(chrono::milliseconds(500));
+	if (p_client->isConnected())
+		p_client->disconnect();
 
-            p_client = nullptr;
-        }
-        else
-        {
-            // Stop timing actors
-            m_failovertimer.cancel();
-            m_submithrtimer.cancel();
-
-            if (Farm::f().isMining())
-            {
-                cnote << "Shutting down miners...";
-                Farm::f().stop();
-            }
-        }
-    }
-    DEV_BUILD_LOG_PROGRAMFLOW(cnote, "PoolManager::stop() end");
+	if (m_farm.isMining())
+	{
+		cnote << "Shutting down miners...";
+		m_farm.stop();
+	}
 }
 
-void PoolManager::addConnection(std::string _connstring)
+void PoolManager::workLoop()
 {
-    m_Settings.connections.push_back(std::shared_ptr<URI>(new URI(_connstring)));
+	while (m_running)
+	{
+		this_thread::sleep_for(chrono::seconds(1));
+		m_hashrateReportingTimePassed++;
+		// Hashrate reporting
+		if (m_hashrateReportingTimePassed > m_hashrateReportingTime) {
+			auto mp = m_farm.miningProgress();
+			std::string h = toHex(toCompactBigEndian(mp.rate(), 1));
+			std::string res = h[0] != '0' ? h : h.substr(1);
+
+			p_client->submitHashrate("0x" + res);
+			m_hashrateReportingTimePassed = 0;
+		}
+	}
 }
 
-void PoolManager::addConnection(std::shared_ptr<URI> _uri)
+void PoolManager::addConnection(string const & host, string const & port, string const & user, string const & pass)
 {
-    m_Settings.connections.push_back(_uri);
+	if (host.empty())
+		return;
+
+	PoolConnection connection(host, port, user, pass);
+	m_connections.push_back(connection);
+
+	if (m_connections.size() == 1) {
+		p_client->setConnection(host, port, user, pass);
+		m_farm.set_pool_addresses(host, port, "", "");
+	}
 }
 
-/*
- * Remove a connection
- * Returns:  0 on success
- *          -1 failure (out of bounds)
- *          -2 failure (active connection should be deleted)
- */
-void PoolManager::removeConnection(unsigned int idx)
+void PoolManager::clearConnections()
 {
-    // Are there any outstanding operations ?
-    if (m_async_pending.load(std::memory_order_relaxed))
-        throw std::runtime_error("Outstanding operations. Retry ...");
-
-    // Check bounds
-    if (idx >= m_Settings.connections.size())
-        throw std::runtime_error("Index out-of bounds.");
-
-    // Can't delete active connection
-    if (idx == m_activeConnectionIdx)
-        throw std::runtime_error("Can't remove active connection");
-
-    // Remove the selected connection
-    m_Settings.connections.erase(m_Settings.connections.begin() + idx);
-    if (m_activeConnectionIdx > idx)
-        m_activeConnectionIdx--;
-
-}
-
-void PoolManager::setActiveConnectionCommon(unsigned int idx)
-{
-
-    // Are there any outstanding operations ?
-    bool ex = false;
-    if (!m_async_pending.compare_exchange_strong(ex, true))
-        throw std::runtime_error("Outstanding operations. Retry ...");
-
-    if (idx != m_activeConnectionIdx)
-    {
-        m_connectionSwitches.fetch_add(1, std::memory_order_relaxed);
-        m_activeConnectionIdx = idx;
-        m_connectionAttempt = 0;
-        p_client->disconnect();
-    }
-    else
-    {
-        // Release the flag immediately
-        m_async_pending.store(false, std::memory_order_relaxed);
-    }
-
-}
-
-/*
- * Sets the active connection
- * Returns: 0 on success, -1 on failure (out of bounds)
- */
-void PoolManager::setActiveConnection(unsigned int idx)
-{
-    // Sets the active connection to the requested index
-    if (idx >= m_Settings.connections.size())
-        throw std::runtime_error("Index out-of bounds.");
-
-    setActiveConnectionCommon(idx);
-}
-
-void PoolManager::setActiveConnection(std::string& _connstring)
-{
-    bool found = false;
-    for (size_t idx = 0; idx < m_Settings.connections.size(); idx++)
-        if (boost::iequals(m_Settings.connections[idx]->str(), _connstring))
-        {
-            setActiveConnectionCommon(idx);
-            break;
-        }
-    if (!found)
-        throw std::runtime_error("Not found.");
-}
-
-std::shared_ptr<URI> PoolManager::getActiveConnection()
-{
-    try
-    {
-        return m_Settings.connections.at(m_activeConnectionIdx);
-    }
-    catch (const std::exception&)
-    {
-        return nullptr;
-    }
-}
-
-Json::Value PoolManager::getConnectionsJson()
-{
-    // Returns the list of configured connections
-    Json::Value jRes;
-    for (size_t i = 0; i < m_Settings.connections.size(); i++)
-    {
-        Json::Value JConn;
-        JConn["index"] = (unsigned)i;
-        JConn["active"] = (i == m_activeConnectionIdx ? true : false);
-        JConn["uri"] = m_Settings.connections[i]->str();
-        jRes.append(JConn);
-    }
-    return jRes;
+	m_connections.clear();
+	m_farm.set_pool_addresses("", "", "", "");
+	if (p_client && p_client->isConnected())
+		p_client->disconnect();
 }
 
 void PoolManager::start()
 {
-    m_running.store(true, std::memory_order_relaxed);
-    m_async_pending.store(true, std::memory_order_relaxed);
-    m_connectionSwitches.fetch_add(1, std::memory_order_relaxed);
-    g_io_service.post(m_io_strand.wrap(boost::bind(&PoolManager::rotateConnect, this)));
+	if (m_connections.size() > 0) {
+		m_running = true;
+		startWorking();
+
+		// Try to connect to pool
+		p_client->connect();
+	}
+	else {
+		cwarn << "Manager has no connections defined!";
+	}
 }
 
-void PoolManager::rotateConnect()
+void PoolManager::tryReconnect()
 {
-    if (p_client && p_client->isConnected())
-        return;
+	// No connections available, so why bother trying to reconnect
+	if (m_connections.size() <= 0) {
+		cwarn << "Manager has no connections defined!";
+		return;
+	}
 
-    // Check we're within bounds
-    if (m_activeConnectionIdx >= m_Settings.connections.size())
-        m_activeConnectionIdx = 0;
+	for (auto i = 4; --i; this_thread::sleep_for(chrono::seconds(1))) {
+		cwarn << "Retrying in " << i << "... \r";
+	}
 
-    // If this connection is marked Unrecoverable then discard it
-    if (m_Settings.connections.at(m_activeConnectionIdx)->IsUnrecoverable())
-    {
-        m_Settings.connections.erase(m_Settings.connections.begin() + m_activeConnectionIdx);
-        m_connectionAttempt = 0;
-        if (m_activeConnectionIdx >= m_Settings.connections.size())
-            m_activeConnectionIdx = 0;
-        m_connectionSwitches.fetch_add(1, std::memory_order_relaxed);
-    }
-    else if (m_connectionAttempt >= m_Settings.connectionMaxRetries)
-    {
-        // If this is the only connection we can't rotate
-        // forever
-        if (m_Settings.connections.size() == 1)
-        {
-            m_Settings.connections.erase(m_Settings.connections.begin() + m_activeConnectionIdx);
-        }
-        // Rotate connections if above max attempts threshold
-        else
-        {
-            m_connectionAttempt = 0;
-            m_activeConnectionIdx++;
-            if (m_activeConnectionIdx >= m_Settings.connections.size())
-                m_activeConnectionIdx = 0;
-            m_connectionSwitches.fetch_add(1, std::memory_order_relaxed);
-        }
-    }
+	// We do not need awesome logic here, we jst have one connection anyways
+	if (m_connections.size() == 1) {
+		p_client->connect();
+		return;
+	}
 
-    if (!m_Settings.connections.empty() && m_Settings.connections.at(m_activeConnectionIdx)->Host() != "exit")
-    {
-        if (p_client)
-            p_client = nullptr;
-
-        if (m_Settings.connections.at(m_activeConnectionIdx)->Family() == ProtocolFamily::GETWORK)
-            p_client =
-                std::unique_ptr<PoolClient>(new EthGetworkClient(m_Settings.noWorkTimeout, m_Settings.getWorkPollInterval));
-        if (m_Settings.connections.at(m_activeConnectionIdx)->Family() == ProtocolFamily::STRATUM)
-            p_client = std::unique_ptr<PoolClient>(
-                new EthStratumClient(m_Settings.noWorkTimeout, m_Settings.noResponseTimeout));
-        if (m_Settings.connections.at(m_activeConnectionIdx)->Family() == ProtocolFamily::SIMULATION)
-            p_client = std::unique_ptr<PoolClient>(new SimulateClient(m_Settings.benchmarkBlock));
-
-        if (p_client)
-            setClientHandlers();
-
-        // Count connectionAttempts
-        m_connectionAttempt++;
-
-        // Invoke connections
-        m_selectedHost = m_Settings.connections.at(m_activeConnectionIdx)->Host() + ":" +
-                         to_string(m_Settings.connections.at(m_activeConnectionIdx)->Port());
-        p_client->setConnection(m_Settings.connections.at(m_activeConnectionIdx));
-        cnote << "Selected pool " << m_selectedHost;
-
-        p_client->connect();
-    }
-    else
-    {
-
-        if (m_Settings.connections.empty())
-            cnote << "No more connections to try. Exiting...";
-        else
-            cnote << "'exit' failover just got hit. Exiting...";
-
-        // Stop mining if applicable
-        if (Farm::f().isMining())
-        {
-            cnote << "Shutting down miners...";
-            Farm::f().stop();
-        }
-
-        m_running.store(false, std::memory_order_relaxed);
-        raise(SIGTERM);
-    }
-}
-
-void PoolManager::showMiningAt()
-{
-    // Should not happen
-    if (!m_currentWp)
-        return;
-
-    double d = dev::getHashesToTarget(m_currentWp.boundary.hex(HexPrefix::Add));
-    cnote << "Epoch : " EthWhite << m_currentWp.epoch << EthReset << " Difficulty : " EthWhite
-          << dev::getFormattedHashes(d) << EthReset;
-}
-
-void PoolManager::failovertimer_elapsed(const boost::system::error_code& ec)
-{
-    if (!ec)
-    {
-        if (m_running.load(std::memory_order_relaxed))
-        {
-            if (m_activeConnectionIdx != 0)
-            {
-                m_activeConnectionIdx = 0;
-                m_connectionAttempt = 0;
-                m_connectionSwitches.fetch_add(1, std::memory_order_relaxed);
-                cnote << "Failover timeout reached, retrying connection to primary pool";
-                p_client->disconnect();
-            }
-        }
-    }
-}
-
-void PoolManager::submithrtimer_elapsed(const boost::system::error_code& ec)
-{
-    if (!ec)
-    {
-        if (m_running.load(std::memory_order_relaxed))
-        {
-
-            if (p_client && p_client->isConnected())
-                p_client->submitHashrate((uint32_t)Farm::f().HashRate(), m_Settings.hashRateId);
-
-            // Resubmit actor
-            m_submithrtimer.expires_from_now(boost::posix_time::seconds(m_Settings.hashRateInterval));
-            m_submithrtimer.async_wait(m_io_strand.wrap(boost::bind(
-                &PoolManager::submithrtimer_elapsed, this, boost::asio::placeholders::error)));
-        }
-    }
-}
-
-int PoolManager::getCurrentEpoch()
-{
-    return m_currentWp.epoch;
-}
-
-double PoolManager::getCurrentDifficulty()
-{
-    if (!m_currentWp)
-        return 0.0;
-
-    return dev::getHashesToTarget(m_currentWp.boundary.hex(HexPrefix::Add));
-}
-
-unsigned PoolManager::getConnectionSwitches()
-{
-    return m_connectionSwitches.load(std::memory_order_relaxed);
-}
-
-unsigned PoolManager::getEpochChanges()
-{
-    return m_epochChanges.load(std::memory_order_relaxed);
+	// Fallback logic, tries current connection multiple times and then switches to
+	// one of the other connections.
+	if (m_reconnectTries > m_reconnectTry) {
+		m_reconnectTry++;
+		p_client->connect();
+	}
+	else {
+		m_reconnectTry = 0;
+		m_activeConnectionIdx++;
+		if (m_activeConnectionIdx >= m_connections.size()) {
+			m_activeConnectionIdx = 0;
+		}
+		PoolConnection newConnection = m_connections[m_activeConnectionIdx];
+		p_client->setConnection(newConnection.host(), newConnection.port(), newConnection.user(), newConnection.pass());
+		m_farm.set_pool_addresses(newConnection.host(), newConnection.port(), "", "");
+		p_client->connect();
+	}
 }
