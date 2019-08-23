@@ -2,6 +2,7 @@
 #include "EthStratumClient.h"
 #include <libdevcore/Log.h>
 #include <libethash/endian.h>
+#include <ethminer-buildinfo.h>
 
 #ifdef _WIN32
 #include <wincrypt.h>
@@ -117,7 +118,15 @@ void EthStratumClient::connect()
 
 			SSL_CTX_set_cert_store(ctx.native_handle(), store);
 #else
-			ctx.set_default_verify_paths();
+			char *certPath = getenv("SSL_CERT_FILE");
+			try {
+				ctx.load_verify_file(certPath ? certPath : "/etc/ssl/certs/ca-certificates.crt");
+			}
+			catch (...) {
+				cwarn << "Failed to load ca certificates. Either the file '/etc/ssl/certs/ca-certificates.crt' does not exist";
+				cwarn << "or the environment variable SSL_CERT_FILE is set to an invalid or inaccessable file.";
+				cwarn << "It is possible that certificate verification can fail.";
+			}
 #endif
 		}
 	}
@@ -207,6 +216,17 @@ void EthStratumClient::connect_handler(const boost::system::error_code& ec, tcp:
 			m_securesocket->handshake(boost::asio::ssl::stream_base::client, hec);
 			if (hec) {
 				cwarn << "SSL/TLS Handshake failed: " << hec.message();
+				if (hec.value() == 337047686) { // certificate verification failed
+					cwarn << "This can have multiple reasons:";
+					cwarn << "* Root certs are either not installed or not found";
+					cwarn << "* Pool uses a self-signed certificate";
+					cwarn << "Possible fixes:";
+					cwarn << "* Make sure the file '/etc/ssl/certs/ca-certificates.crt' exists and is accessable";
+					cwarn << "* Export the correct path via 'export SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt' to the correct file";
+					cwarn << "  On most systems you can install the 'ca-certificates' package";
+					cwarn << "  You can also get the latest file here: https://curl.haxx.se/docs/caextract.html";
+					cwarn << "* Disable certificate verification all-together via command-line option.";
+				}
 				disconnect();
 				return;
 			}
@@ -241,7 +261,7 @@ void EthStratumClient::connect_handler(const boost::system::error_code& ec, tcp:
 				break;
 			case STRATUM_PROTOCOL_ETHEREUMSTRATUM:
 				m_authorized = true;
-				os << "{\"id\": 1, \"method\": \"mining.subscribe\", \"params\": [\"ethminer/" << ETH_PROJECT_VERSION << "\",\"EthereumStratum/1.0.0\"]}\n";
+				os << "{\"id\": 1, \"method\": \"mining.subscribe\", \"params\": [\"ethminer/" << ethminer_get_buildinfo()->project_version << "\",\"EthereumStratum/1.0.0\"]}\n";
 				break;
 		}
 
@@ -526,7 +546,7 @@ void EthStratumClient::processReponse(Json::Value& responseObject)
 		}
 		else if (method == "client.get_version")
 		{
-			os << "{\"error\": null, \"id\" : " << id << ", \"result\" : \"" << ETH_PROJECT_VERSION << "\"}\n";
+			os << "{\"error\": null, \"id\" : " << id << ", \"result\" : \"" << ethminer_get_buildinfo()->project_version << "\"}\n";
 			if (m_secureMode != StratumSecure::NONE) {
 				async_write(*m_securesocket, m_requestBuffer,
 					boost::bind(&EthStratumClient::handleResponse, this,
