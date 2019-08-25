@@ -25,8 +25,6 @@ along with cpp-ethereum.  If not, see <http://www.gnu.org/licenses/>.
 #include <libdevcore/Worker.h>
 #include <libethcore/EthashAux.h>
 #include <libethcore/Miner.h>
-#include <libethcore/Miner.h>
-#include <libhwmon/wrapnvml.h>
 #include "ethash_cuda_miner_kernel.h"
 #include "libethash/internal.h"
 
@@ -57,11 +55,11 @@ public:
 		uint64_t _currentBlock,
 		unsigned _dagLoadMode,
 		unsigned _dagCreateDevice,
-		bool _noeval
+		bool _noeval,
+		bool _exit
 		);
 	static void setNumInstances(unsigned _instances);
 	static void setDevices(const vector<unsigned>& _devices, unsigned _selectedDeviceCount);
-	HwMonitor hwmon() override;
 	static bool cuda_configureGPU(
 		size_t numDevices,
 		const vector<int>& _devices,
@@ -91,7 +89,6 @@ public:
 		bool _ethStratum,
 		uint64_t _startN,
 		const dev::eth::WorkPackage& w);
-		dev::eth::HwMonitor cuda_hwmon();
 
 	/* -- default values -- */
 	/// Default value of the block size. Also known as workgroup size.
@@ -105,7 +102,7 @@ protected:
 	void kick_miner() override;
 
 private:
-	atomic<bool> m_abort = {false};
+	atomic<bool> m_new_work = {false};
 
 	void workLoop() override;
 
@@ -137,12 +134,11 @@ private:
 
 	static unsigned m_parallelHash;
 
-	wrap_nvml_handle *nvmlh = nullptr;
-
 	static unsigned s_numInstances;
 	static vector<int> s_devices;
 
 	static bool s_noeval;
+
 };
 
 
