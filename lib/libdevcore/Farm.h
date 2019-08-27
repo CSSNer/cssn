@@ -30,6 +30,11 @@
 #include <libdevcore/Worker.h>
 #include <libethcore/Miner.h>
 #include <libethcore/BlockHeader.h>
+#include <libhwmon/wrapnvml.h>
+#include <libhwmon/wrapadl.h>
+#if defined(__linux)
+#include <libhwmon/wrapamdsysfs.h>
+#endif
 
 namespace dev
 {
@@ -59,10 +64,28 @@ public:
 		// per run randomized start place, without creating much overhead.
 		random_device engine;
 		m_nonce_scrambler = uniform_int_distribution<uint64_t>()(engine);
+
+		// Init HWMON
+		adlh = wrap_adl_create();
+#if defined(__linux)
+		sysfsh = wrap_amdsysfs_create();
+#endif
+		nvmlh = wrap_nvml_create();
 	}
 
 	~Farm()
 	{
+		// Deinit HWMON
+		if (adlh)
+			wrap_adl_destroy(adlh);
+#if defined(__linux)
+		if (sysfsh)
+			wrap_amdsysfs_destroy(sysfsh);
+#endif
+		if (nvmlh)
+			wrap_nvml_destroy(nvmlh);
+
+		// Stop mining
 		stop();
 	}
 
@@ -109,6 +132,7 @@ public:
 		}
 		else
 		{
+
 			start = m_miners.size();
 			ins += start;
 			m_miners.reserve(ins);
@@ -160,39 +184,39 @@ public:
 		}
 	}
 
-	void collectHashRate()
-	{
-		WorkingProgress p;
-		Guard l2(x_minerWork);
-		p.ms = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - m_lastStart).count();
-		//Collect
-		for (auto const& i : m_miners)
-		{
-			uint64_t minerHashCount = i->hashCount();
-			p.hashes += minerHashCount;
-			p.minersHashes.push_back(minerHashCount);
-		}
+    void collectHashRate()
+    {
+        auto now = std::chrono::steady_clock::now();
 
-		//Reset
-		for (auto const& i : m_miners)
-		{
-			i->resetHashCount();
-		}
-		m_lastStart = std::chrono::steady_clock::now();
+        std::lock_guard<std::mutex> lock(x_minerWork);
 
-		if (p.hashes > 0) {
-			m_lastProgresses.push_back(p);
-		}
+        WorkingProgress p;
+        p.ms = std::chrono::duration_cast<std::chrono::milliseconds>(now - m_lastStart).count();
+        m_lastStart = now;
 
-		// We smooth the hashrate over the last x seconds
-		int allMs = 0;
-		for (auto const& cp : m_lastProgresses) {
-			allMs += cp.ms;
-		}
-		if (allMs > m_hashrateSmoothInterval) {
-			m_lastProgresses.erase(m_lastProgresses.begin());
-		}
-	}
+        // Collect
+        for (auto const& i : m_miners)
+        {
+            uint64_t minerHashCount = i->hashCount();
+            p.hashes += minerHashCount;
+            p.minersHashes.push_back(minerHashCount);
+        }
+
+        // Reset
+        for (auto const& i : m_miners)
+            i->resetHashCount();
+
+        if (p.hashes > 0)
+            m_lastProgresses.push_back(p);
+
+        // We smooth the hashrate over the last x seconds
+        int allMs = 0;
+        for (auto const& cp : m_lastProgresses)
+            allMs += cp.ms;
+
+        if (allMs > m_hashrateSmoothInterval)
+            m_lastProgresses.erase(m_lastProgresses.begin());
+    }
 
 	void processHashRate(const boost::system::error_code& ec) {
 
@@ -210,9 +234,6 @@ public:
 	 */
 	void restart()
 	{
-		stop();
-		start(m_lastSealer, b_lastMixed);
-
 		if (m_onMinerRestart) {
 			m_onMinerRestart();
 		}
@@ -223,37 +244,96 @@ public:
 		return m_isMining;
 	}
 
-	/**
-	 * @brief Get information on the progress of mining this work package.
-	 * @return The progress with mining so far.
-	 */
-	WorkingProgress const& miningProgress(bool hwmon = false) const
-	{
-		WorkingProgress p;
-		p.ms = 0;
-		p.hashes = 0;
-		{
-			Guard l2(x_minerWork);
-			for (auto const& i : m_miners) {
-				p.minersHashes.push_back(0);
-				if (hwmon)
-					p.minerMonitors.push_back(i->hwmon());
+    /**
+     * @brief Get information on the progress of mining this work package.
+     * @return The progress with mining so far.
+     */
+    WorkingProgress const& miningProgress(bool hwmon = false, bool power = false) const
+    {
+        std::lock_guard<std::mutex> lock(x_minerWork);
+        WorkingProgress p;
+        p.ms = 0;
+        p.hashes = 0;
+        for (auto const& i : m_miners)
+        {
+            p.minersHashes.push_back(0);
+			if (hwmon) {
+				HwMonitorInfo hwInfo = i->hwmonInfo();
+				HwMonitor hw;
+				unsigned int tempC = 0, fanpcnt = 0, powerW = 0;
+				if (hwInfo.deviceIndex >= 0) {
+					if (hwInfo.deviceType == HwMonitorInfoType::NVIDIA && nvmlh) {
+						int typeidx = 0;
+						if(hwInfo.indexSource == HwMonitorIndexSource::CUDA){
+							typeidx = nvmlh->cuda_nvml_device_id[hwInfo.deviceIndex];
+						}
+						else if(hwInfo.indexSource == HwMonitorIndexSource::OPENCL){
+							typeidx = nvmlh->opencl_nvml_device_id[hwInfo.deviceIndex];
+						}
+						else{
+							//Unknown, don't map
+							typeidx = hwInfo.deviceIndex;
+						}
+						wrap_nvml_get_tempC(nvmlh, typeidx, &tempC);
+						wrap_nvml_get_fanpcnt(nvmlh, typeidx, &fanpcnt);
+						if(power) {
+							wrap_nvml_get_power_usage(nvmlh, typeidx, &powerW);
+						}
+					}
+					else if (hwInfo.deviceType == HwMonitorInfoType::AMD && adlh) {
+						int typeidx = 0;
+						if(hwInfo.indexSource == HwMonitorIndexSource::OPENCL){
+							typeidx = adlh->opencl_adl_device_id[hwInfo.deviceIndex];
+						}
+						else{
+							//Unknown, don't map
+							typeidx = hwInfo.deviceIndex;
+						}
+						wrap_adl_get_tempC(adlh, typeidx, &tempC);
+						wrap_adl_get_fanpcnt(adlh, typeidx, &fanpcnt);
+						if(power) {
+							wrap_adl_get_power_usage(adlh, typeidx, &powerW);
+						}
+					}
+#if defined(__linux)
+					// Overwrite with sysfs data if present
+					if (hwInfo.deviceType == HwMonitorInfoType::AMD && sysfsh) {
+						int typeidx = 0;
+						if(hwInfo.indexSource == HwMonitorIndexSource::OPENCL){
+							typeidx = sysfsh->opencl_sysfs_device_id[hwInfo.deviceIndex];
+						}
+						else{
+							//Unknown, don't map
+							typeidx = hwInfo.deviceIndex;
+						}
+						wrap_amdsysfs_get_tempC(sysfsh, typeidx, &tempC);
+						wrap_amdsysfs_get_fanpcnt(sysfsh, typeidx, &fanpcnt);
+						if(power) {
+							wrap_amdsysfs_get_power_usage(sysfsh, typeidx, &powerW);
+						}
+					}
+#endif
+				}
+				hw.tempC = tempC;
+				hw.fanP = fanpcnt;
+				hw.powerW = powerW/((double)1000.0);
+				p.minerMonitors.push_back(hw);
 			}
-		}
+        }
 
-		for (auto const& cp : m_lastProgresses) {
-			p.ms += cp.ms;
-			p.hashes += cp.hashes;
-			for (unsigned int i = 0; i < cp.minersHashes.size(); i++)
-			{
-				p.minersHashes.at(i) += cp.minersHashes.at(i);
-			}
-		}
+        for (auto const& cp : m_lastProgresses)
+        {
+            p.ms += cp.ms;
+            p.hashes += cp.hashes;
+            for (unsigned int i = 0; i < cp.minersHashes.size(); i++)
+            {
+                p.minersHashes.at(i) += cp.minersHashes.at(i);
+            }
+        }
 
-		Guard l(x_progress);
-		m_progress = p;
-		return m_progress;
-	}
+        m_progress = p;
+        return m_progress;
+    }
 
 	SolutionStats getSolutionStats() {
 		return m_solutionStats;
@@ -350,10 +430,7 @@ private:
 
 	std::atomic<bool> m_isMining = {false};
 
-	mutable Mutex x_progress;
 	mutable WorkingProgress m_progress;
-
-	mutable Mutex x_hwmons;
 
 	SolutionFound m_onSolutionFound;
 	MinerRestart m_onMinerRestart;
@@ -374,6 +451,12 @@ private:
 
     	string m_pool_addresses;
 	uint64_t m_nonce_scrambler;
+
+	wrap_nvml_handle *nvmlh = NULL;
+	wrap_adl_handle *adlh = NULL;
+#if defined(__linux)
+	wrap_amdsysfs_handle *sysfsh = NULL;
+#endif
 };
 
 }
