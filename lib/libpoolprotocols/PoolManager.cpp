@@ -5,6 +5,20 @@ using namespace std;
 using namespace dev;
 using namespace eth;
 
+static string diffToDisplay(double diff)
+{
+	static const char* k[] = {"hashes", "kilohashes", "megahashes", "gigahashes", "terahashes", "petahashes"};
+	uint32_t i = 0;
+	while ((diff > 1000.0) && (i < ((sizeof(k) / sizeof(char *)) - 2)))
+	{
+		i++;
+		diff = diff / 1000.0;
+	}
+	stringstream ss;
+	ss << fixed << setprecision(4) << diff << ' ' << k[i];
+	return ss.str();
+}
+
 PoolManager::PoolManager(PoolClient * client, Farm &farm, MinerType const & minerType) : Worker("main"), m_farm(farm), m_minerType(minerType)
 {
 	p_client = client;
@@ -35,7 +49,16 @@ PoolManager::PoolManager(PoolClient * client, Farm &farm, MinerType const & mine
 	{
 		m_reconnectTry = 0;
 		m_farm.setWork(wp);
-		cnote << "Received new job #" + wp.header.hex().substr(0, 8) + " from " + m_connections[m_activeConnectionIdx].host();
+		if (wp.boundary != m_lastBoundary)
+		{
+			using namespace boost::multiprecision;
+
+			m_lastBoundary = wp.boundary;
+			static const uint512_t dividend("0x10000000000000000000000000000000000000000000000000000000000000000");
+			const uint256_t divisor(string("0x") + m_lastBoundary.hex());
+			cnote << "New pool difficulty:" << EthWhite << diffToDisplay(double(dividend / divisor)) << EthReset;
+		}
+		cnote << "Received new job" << wp.header << "from " + m_connections[m_activeConnectionIdx].host();
 	});
 	p_client->onSolutionAccepted([&](bool const& stale)
 	{
@@ -50,6 +73,10 @@ PoolManager::PoolManager(PoolClient * client, Farm &farm, MinerType const & mine
 		auto ms = duration_cast<milliseconds>(steady_clock::now() - m_submit_time);
 		cwarn << EthRed "**Rejected" EthReset << (stale ? " (stale)" : "") << " in" << ms.count() << "ms.";
 		m_farm.rejectedSolution(stale);
+	});
+	p_client->onSolutionStale([&]()
+	{
+		m_farm.staleSolution();
 	});
 
 	m_farm.onSolutionFound([&](Solution sol)

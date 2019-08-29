@@ -132,7 +132,6 @@ public:
 		}
 		else
 		{
-
 			start = m_miners.size();
 			ins += start;
 			m_miners.reserve(ins);
@@ -260,56 +259,30 @@ public:
 			if (hwmon) {
 				HwMonitorInfo hwInfo = i->hwmonInfo();
 				HwMonitor hw;
+				hw.powerW = 0.0;
 				unsigned int tempC = 0, fanpcnt = 0, powerW = 0;
 				if (hwInfo.deviceIndex >= 0) {
 					if (hwInfo.deviceType == HwMonitorInfoType::NVIDIA && nvmlh) {
-						int typeidx = 0;
-						if(hwInfo.indexSource == HwMonitorIndexSource::CUDA){
-							typeidx = nvmlh->cuda_nvml_device_id[hwInfo.deviceIndex];
-						}
-						else if(hwInfo.indexSource == HwMonitorIndexSource::OPENCL){
-							typeidx = nvmlh->opencl_nvml_device_id[hwInfo.deviceIndex];
-						}
-						else{
-							//Unknown, don't map
-							typeidx = hwInfo.deviceIndex;
-						}
-						wrap_nvml_get_tempC(nvmlh, typeidx, &tempC);
-						wrap_nvml_get_fanpcnt(nvmlh, typeidx, &fanpcnt);
+						wrap_nvml_get_tempC(nvmlh, hwInfo.deviceIndex, &tempC);
+						wrap_nvml_get_fanpcnt(nvmlh, hwInfo.deviceIndex, &fanpcnt);
 						if(power) {
-							wrap_nvml_get_power_usage(nvmlh, typeidx, &powerW);
+							wrap_nvml_get_power_usage(nvmlh, hwInfo.deviceIndex, &powerW);
 						}
 					}
 					else if (hwInfo.deviceType == HwMonitorInfoType::AMD && adlh) {
-						int typeidx = 0;
-						if(hwInfo.indexSource == HwMonitorIndexSource::OPENCL){
-							typeidx = adlh->opencl_adl_device_id[hwInfo.deviceIndex];
-						}
-						else{
-							//Unknown, don't map
-							typeidx = hwInfo.deviceIndex;
-						}
-						wrap_adl_get_tempC(adlh, typeidx, &tempC);
-						wrap_adl_get_fanpcnt(adlh, typeidx, &fanpcnt);
+						wrap_adl_get_tempC(adlh, hwInfo.deviceIndex, &tempC);
+						wrap_adl_get_fanpcnt(adlh, hwInfo.deviceIndex, &fanpcnt);
 						if(power) {
-							wrap_adl_get_power_usage(adlh, typeidx, &powerW);
+							wrap_adl_get_power_usage(adlh, hwInfo.deviceIndex, &powerW);
 						}
 					}
 #if defined(__linux)
 					// Overwrite with sysfs data if present
 					if (hwInfo.deviceType == HwMonitorInfoType::AMD && sysfsh) {
-						int typeidx = 0;
-						if(hwInfo.indexSource == HwMonitorIndexSource::OPENCL){
-							typeidx = sysfsh->opencl_sysfs_device_id[hwInfo.deviceIndex];
-						}
-						else{
-							//Unknown, don't map
-							typeidx = hwInfo.deviceIndex;
-						}
-						wrap_amdsysfs_get_tempC(sysfsh, typeidx, &tempC);
-						wrap_amdsysfs_get_fanpcnt(sysfsh, typeidx, &fanpcnt);
+						wrap_amdsysfs_get_tempC(sysfsh, hwInfo.deviceIndex, &tempC);
+						wrap_amdsysfs_get_fanpcnt(sysfsh, hwInfo.deviceIndex, &fanpcnt);
 						if(power) {
-							wrap_amdsysfs_get_power_usage(sysfsh, typeidx, &powerW);
+							wrap_amdsysfs_get_power_usage(sysfsh, hwInfo.deviceIndex, &powerW);
 						}
 					}
 #endif
@@ -363,6 +336,10 @@ public:
 		{
 			m_solutionStats.rejectedStale();
 		}
+	}
+
+	void staleSolution() {
+		m_solutionStats.addStale();
 	}
 
 	using SolutionFound = std::function<void(Solution const&)>;

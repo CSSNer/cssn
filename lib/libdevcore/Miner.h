@@ -70,19 +70,10 @@ enum class HwMonitorInfoType
 	AMD
 };
 
-enum class HwMonitorIndexSource
-{
-	UNKNOWN,
-	OPENCL,
-	CUDA
-};
-
 struct HwMonitorInfo
 {
 	HwMonitorInfoType deviceType = HwMonitorInfoType::UNKNOWN;
-	HwMonitorIndexSource indexSource = HwMonitorIndexSource::UNKNOWN;
 	int deviceIndex = -1;
-
 };
 
 struct HwMonitor
@@ -142,6 +133,13 @@ public:
 
 	void acceptedStale() { acceptedStales++; }
 	void rejectedStale() { rejectedStales++; }
+
+	void addStale()
+	{
+		if (accepts)
+			accepts --;
+		acceptedStales++;
+	}
 
 	void reset() { accepts = rejects = failures = acceptedStales = rejectedStales = 0; }
 
