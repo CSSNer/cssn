@@ -1,6 +1,8 @@
 #ifndef POOL_MANAGER_H_
 #define POOL_MANAGER_H_
 
+#pragma once
+
 #include <iostream>
 #include <libdevcore/Worker.h>
 #include <libethcore/Farm.h>
@@ -42,6 +44,7 @@ namespace dev
 			void stop();
 			void setReconnectTries(unsigned const & reconnectTries) { m_reconnectTries = reconnectTries; };
 			bool isConnected() { return p_client->isConnected(); };
+			bool isRunning() { return m_running; };
 
 		private:
 			unsigned m_hashrateReportingTime = 10;
@@ -53,6 +56,7 @@ namespace dev
 			unsigned m_reconnectTry = 0;
 			std::vector <PoolConnection> m_connections;
 			unsigned m_activeConnectionIdx = 0;
+			h256 m_lastBoundary = h256();
 
 			PoolClient *p_client;
 			Farm &m_farm;
