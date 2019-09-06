@@ -37,18 +37,7 @@
 #define DAG_LOAD_MODE_SEQUENTIAL 1
 #define DAG_LOAD_MODE_SINGLE	 2
 
-#define STRATUM_PROTOCOL_STRATUM		 0
-#define STRATUM_PROTOCOL_ETHPROXY		 1
-#define STRATUM_PROTOCOL_ETHEREUMSTRATUM 2
-
 using namespace std;
-
-typedef struct {
-	string host;
-	string port;
-	string user;
-	string pass;
-} cred_t;
 
 namespace dev
 {
@@ -70,10 +59,19 @@ enum class HwMonitorInfoType
 	AMD
 };
 
+enum class HwMonitorIndexSource
+{
+	UNKNOWN,
+	OPENCL,
+	CUDA
+};
+
 struct HwMonitorInfo
 {
 	HwMonitorInfoType deviceType = HwMonitorInfoType::UNKNOWN;
+	HwMonitorIndexSource indexSource = HwMonitorIndexSource::UNKNOWN;
 	int deviceIndex = -1;
+
 };
 
 struct HwMonitor
@@ -133,13 +131,6 @@ public:
 
 	void acceptedStale() { acceptedStales++; }
 	void rejectedStale() { rejectedStales++; }
-
-	void addStale()
-	{
-		if (accepts)
-			accepts --;
-		acceptedStales++;
-	}
 
 	void reset() { accepts = rejects = failures = acceptedStales = rejectedStales = 0; }
 
