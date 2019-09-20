@@ -1,56 +1,125 @@
-#ifndef POOL_MANAGER_H_
-#define POOL_MANAGER_H_
+#include <map>
+#include <boost/optional/optional_io.hpp>
+#include <boost/algorithm/string.hpp>
+#include <libpoolprotocols/PoolURI.h>
 
-#pragma once
+using namespace dev;
 
-#include <iostream>
-#include <libdevcore/Worker.h>
-#include <libethcore/Farm.h>
-#include <libethcore/Miner.h>
+typedef struct {
+	ProtocolFamily family;
+	SecureLevel secure;
+	unsigned version;
+} SchemeAttributes;
 
-#include "PoolClient.h"
-#if ETH_DBUS
-#include "DBusInt.h"
-#endif
+static std::map<std::string, SchemeAttributes> s_schemes = {
+	{"stratum+tcp",	  {ProtocolFamily::STRATUM, SecureLevel::NONE,  0}},
+	{"stratum1+tcp",  {ProtocolFamily::STRATUM, SecureLevel::NONE,  1}},
+	{"stratum2+tcp",  {ProtocolFamily::STRATUM, SecureLevel::NONE,  2}},
+	{"stratum+tls",	  {ProtocolFamily::STRATUM, SecureLevel::TLS,   0}},
+	{"stratum1+tls",  {ProtocolFamily::STRATUM, SecureLevel::TLS,   1}},
+	{"stratum2+tls",  {ProtocolFamily::STRATUM, SecureLevel::TLS,   2}},
+	{"stratum+tls12", {ProtocolFamily::STRATUM, SecureLevel::TLS12, 0}},
+	{"stratum1+tls12",{ProtocolFamily::STRATUM, SecureLevel::TLS12, 1}},
+	{"stratum2+tls12",{ProtocolFamily::STRATUM, SecureLevel::TLS12, 2}},
+	{"stratum+ssl",	  {ProtocolFamily::STRATUM, SecureLevel::TLS12, 0}},
+	{"stratum1+ssl",  {ProtocolFamily::STRATUM, SecureLevel::TLS12, 1}},
+	{"stratum2+ssl",  {ProtocolFamily::STRATUM, SecureLevel::TLS12, 2}},
+	{"http",	  {ProtocolFamily::GETWORK, SecureLevel::NONE,  0}}
+};
 
-using namespace std;
+URI::URI() {}
 
-namespace dev
+URI::URI(const std::string uri)
 {
-	namespace eth
-	{
-		class PoolManager : public Worker
-		{
-		public:
-			PoolManager(PoolClient * client, Farm &farm, MinerType const & minerType);
-			void addConnection(PoolConnection &conn);
-			void clearConnections();
-			void start();
-			void stop();
-			void setReconnectTries(unsigned const & reconnectTries) { m_reconnectTries = reconnectTries; };
-			bool isConnected() { return p_client->isConnected(); };
-			bool isRunning() { return m_running; };
-
-		private:
-			unsigned m_hashrateReportingTime = 60;
-			unsigned m_hashrateReportingTimePassed = 0;
-
-			bool m_running = false;
-			void workLoop() override;
-			unsigned m_reconnectTries = 3;
-			unsigned m_reconnectTry = 0;
-			std::vector <PoolConnection> m_connections;
-			unsigned m_activeConnectionIdx = 0;
-			h256 m_lastBoundary = h256();
-
-			PoolClient *p_client;
-			Farm &m_farm;
-			MinerType m_minerType;
-			std::chrono::steady_clock::time_point m_submit_time;
-			void tryReconnect();
-		};
-	}
+	std::string u = uri;
+	if (u.find("://") == std::string::npos)
+		u = std::string("unspecified://") + u;
+	m_uri = network::uri(u);
 }
 
-#endif
+bool URI::KnownScheme()
+{
+	std::string s(*m_uri.scheme());
+	boost::trim(s);
+	return s_schemes.find(s) != s_schemes.end();
+}
 
+ProtocolFamily URI::ProtoFamily() const
+{
+	std::string s(*m_uri.scheme());
+	boost::trim(s);
+	return s_schemes[s].family;
+}
+
+unsigned URI::ProtoVersion() const
+{
+	std::string s(*m_uri.scheme());
+	boost::trim(s);
+	return s_schemes[s].version;
+}
+
+SecureLevel URI::ProtoSecureLevel() const
+{
+	std::string s(*m_uri.scheme());
+	boost::trim(s);
+	return s_schemes[s].secure;
+}
+
+std::string URI::KnownSchemes(ProtocolFamily family)
+{
+	std::string schemes;
+	for(const auto&s : s_schemes)
+		if (s.second.family == family)
+			schemes += s.first + " ";
+	boost::trim(schemes);
+	return schemes;
+}
+
+std::string URI::Scheme() const
+{
+	std::string s(*m_uri.scheme());
+	boost::trim(s);
+	return s;
+}
+
+std::string URI::Host() const
+{
+	std::string s(*m_uri.host());
+	boost::trim(s);
+	if (s == "--")
+		return "";
+	return s;
+}
+
+unsigned short URI::Port() const
+{
+	std::string s(*m_uri.port());
+	boost::trim(s);
+	if (s == "--")
+		return 0;
+	return (unsigned short)atoi(s.c_str());
+}
+
+std::string URI::User() const
+{
+	std::string s(*m_uri.user_info());
+	boost::trim(s);
+	if (s == "--")
+		return "";
+	size_t f = s.find(":");
+	if (f == std::string::npos)
+		return s;
+	return s.substr(0, f);
+}
+
+std::string URI::Pswd() const
+{
+	std::string s(*m_uri.user_info());
+	boost::trim(s);
+	if (s == "--")
+		return "";
+	size_t f = s.find(":");
+	if (f == std::string::npos)
+		return "";
+	return s.substr(f + 1);
+}
