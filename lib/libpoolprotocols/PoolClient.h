@@ -1,7 +1,6 @@
-#ifndef POOL_CLIENT_H_
-#define POOL_CLIENT_H_
-
 #pragma once
+
+#include <queue>
 
 #include <boost/asio/ip/address.hpp>
 
@@ -13,92 +12,61 @@ using namespace std;
 
 namespace dev
 {
-	namespace eth
-	{
-		class PoolConnection
-		{
-		public:
-			PoolConnection() {};
-			PoolConnection(const URI &uri)
-			      : m_host(uri.Host()),
-				m_port(uri.Port()),
-				m_user(uri.User()),
-				m_pass(uri.Pswd()),
-				m_secLevel(uri.ProtoSecureLevel()),
-				m_version(uri.ProtoVersion()) {};
-			string Host() const { return m_host; };
-			unsigned short Port() const { return m_port; };
-			string User() const { return m_user; };
-			string Pass() const { return m_pass; };
-			SecureLevel SecLevel() const { return m_secLevel; };
-			boost::asio::ip::address Address() const { return m_address; };
-			unsigned Version() const { return m_version; };
+namespace eth
+{
+class PoolClient
+{
+public:
+    virtual ~PoolClient() noexcept = default;
 
 
-			void Host(string host) { m_host = host; };
-			void Port(unsigned short port) { m_port = port; };
-			void User(string user) { m_user = user; };
-			void Pass(string pass) { m_pass = pass; };
-			void SecLevel(SecureLevel secLevel) { m_secLevel = secLevel; };
-			void Address(boost::asio::ip::address address) { m_address = address; };
-			void Version(unsigned version) { m_version = version; };
+    void setConnection(URI* conn)
+    {
+        m_conn = conn;
+        m_canconnect.store(false, std::memory_order_relaxed);
+    }
 
-		private:
-			// Normally we'd replace the following with a single URI variable
-			// But URI attributes are read only, and to support legacy arameters
-			// we need to update these connection attributes individually.
-		        string m_host;
-			unsigned short m_port;
-			string m_user;
-			string m_pass;
-			SecureLevel m_secLevel = SecureLevel::NONE;
-			unsigned m_version = 0;
+    const URI* getConnection() { return m_conn; }
+    void unsetConnection() { m_conn = nullptr; }
 
-			boost::asio::ip::address m_address;
-		};
+    virtual void connect() = 0;
+    virtual void disconnect() = 0;
 
-		class PoolClient
-		{
-		public:
-			void setConnection(PoolConnection &conn)
-			{
-				m_conn = conn;
-				m_connection_changed = true;
-			}
+    virtual void submitHashrate(string const& rate, string const& id) = 0;
+    virtual void submitSolution(const Solution& solution) = 0;
+    virtual bool isConnected() = 0;
+    virtual bool isPendingState() = 0;
+    virtual string ActiveEndPoint() = 0;
 
-			virtual void connect() = 0;
-			virtual void disconnect() = 0;
+    using SolutionAccepted =
+        std::function<void(std::chrono::milliseconds const&, unsigned const& miner_index)>;
+    using SolutionRejected =
+        std::function<void(std::chrono::milliseconds const&, unsigned const& miner_index)>;
+    using Disconnected = std::function<void()>;
+    using Connected = std::function<void()>;
+    using WorkReceived = std::function<void(WorkPackage const&)>;
 
-			virtual void submitHashrate(string const & rate) = 0;
-			virtual void submitSolution(Solution solution) = 0;
-			virtual bool isConnected() = 0;
+    void onSolutionAccepted(SolutionAccepted const& _handler) { m_onSolutionAccepted = _handler; }
+    void onSolutionRejected(SolutionRejected const& _handler) { m_onSolutionRejected = _handler; }
+    void onDisconnected(Disconnected const& _handler) { m_onDisconnected = _handler; }
+    void onConnected(Connected const& _handler) { m_onConnected = _handler; }
+    void onWorkReceived(WorkReceived const& _handler) { m_onWorkReceived = _handler; }
 
-			using SolutionAccepted = std::function<void(bool const&)>;
-			using SolutionRejected = std::function<void(bool const&)>;
-			using Disconnected = std::function<void()>;
-			using Connected = std::function<void()>;
-			using WorkReceived = std::function<void(WorkPackage const&)>;
+protected:
+    std::atomic<bool> m_subscribed = {false};
+    std::atomic<bool> m_authorized = {false};
+    std::atomic<bool> m_connected = {false};
+    std::atomic<bool> m_canconnect = {false};
 
-			void onSolutionAccepted(SolutionAccepted const& _handler) { m_onSolutionAccepted = _handler; }
-			void onSolutionRejected(SolutionRejected const& _handler) { m_onSolutionRejected = _handler; }
-			void onDisconnected(Disconnected const& _handler) { m_onDisconnected = _handler; }
-			void onConnected(Connected const& _handler) { m_onConnected = _handler; }
-			void onWorkReceived(WorkReceived const& _handler) { m_onWorkReceived = _handler; }
+    boost::asio::ip::basic_endpoint<boost::asio::ip::tcp> m_endpoint;
 
-		protected:
-			bool m_authorized = false;
-			bool m_connected = false;
-			PoolConnection m_conn;
-			bool m_connection_changed = false;
+    URI* m_conn = nullptr;
 
-			SolutionAccepted m_onSolutionAccepted;
-			SolutionRejected m_onSolutionRejected;
-			Disconnected m_onDisconnected;
-			Connected m_onConnected;
-			WorkReceived m_onWorkReceived;
-		};
-	}
-}
-
-#endif
-
+    SolutionAccepted m_onSolutionAccepted;
+    SolutionRejected m_onSolutionRejected;
+    Disconnected m_onDisconnected;
+    Connected m_onConnected;
+    WorkReceived m_onWorkReceived;
+};
+}  // namespace eth
+}  // namespace dev

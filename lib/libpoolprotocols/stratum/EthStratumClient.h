@@ -1,102 +1,168 @@
 #pragma once
 
 #include <iostream>
+
+#include <boost/algorithm/string.hpp>
 #include <boost/array.hpp>
 #include <boost/asio.hpp>
 #include <boost/asio/ssl.hpp>
 #include <boost/bind.hpp>
-#include <json/json.h>
-#include <libdevcore/Log.h>
-#include <libdevcore/FixedHash.h>
-#include <libethcore/Farm.h>
-#include <libethcore/EthashAux.h>
-#include <libethcore/Miner.h>
-#include "../PoolClient.h"
+#include <boost/lockfree/queue.hpp>
 
+#include <json/json.h>
+
+#include <libdevcore/FixedHash.h>
+#include <libdevcore/Log.h>
+#include <libethcore/EthashAux.h>
+#include <libethcore/Farm.h>
+#include <libethcore/Miner.h>
+
+#include "../PoolClient.h"
 
 using namespace std;
 using namespace dev;
 using namespace dev::eth;
 
+template <typename Verifier>
+class verbose_verification
+{
+public:
+    verbose_verification(Verifier verifier) : verifier_(verifier) {}
+
+    bool operator()(bool preverified, boost::asio::ssl::verify_context& ctx)
+    {
+        char subject_name[256];
+        X509* cert = X509_STORE_CTX_get_current_cert(ctx.native_handle());
+        X509_NAME_oneline(X509_get_subject_name(cert), subject_name, 256);
+        bool verified = verifier_(preverified, ctx);
+#ifdef DEV_BUILD
+        cnote << "Certificate: " << subject_name << " " << (verified ? "Ok" : "Failed");
+#else
+        if (!verified)
+            cnote << "Certificate: " << subject_name << " "
+                  << "Failed";
+#endif
+        return verified;
+    }
+
+private:
+    Verifier verifier_;
+};
+
 class EthStratumClient : public PoolClient
 {
 public:
+    typedef enum { STRATUM = 0, ETHPROXY, ETHEREUMSTRATUM } StratumProtocol;
 
-	typedef enum { STRATUM = 0, ETHPROXY, ETHEREUMSTRATUM } StratumProtocol;
+    EthStratumClient(int worktimeout, int responsetimeout);
 
-	EthStratumClient(int const & worktimeout, string const & email, bool const & submitHashrate);
-	~EthStratumClient();
+    void init_socket();
+    void connect() override;
+    void disconnect() override;
 
-	void connect();
-	void disconnect();
+    // Connected and Connection Statuses
+    bool isConnected() override
+    {
+        return m_connected.load(std::memory_order_relaxed) && !isPendingState();
+    }
+    bool isPendingState() override
+    {
+        return (m_connecting.load(std::memory_order_relaxed) ||
+                m_disconnecting.load(std::memory_order_relaxed));
+    }
 
-	bool isConnected() { return m_connected.load(std::memory_order_relaxed) && m_authorized; }
+    bool isSubscribed() { return m_subscribed.load(std::memory_order_relaxed); }
+    bool isAuthorized() { return m_authorized.load(std::memory_order_relaxed); }
+    string ActiveEndPoint() override { return " [" + toString(m_endpoint) + "]"; };
 
-	void submitHashrate(string const & rate);
-	void submitSolution(Solution solution);
+    void submitHashrate(string const& rate, string const& id) override;
+    void submitSolution(const Solution& solution) override;
 
-	h256 currentHeaderHash() { return m_current.header; }
-	bool current() { return static_cast<bool>(m_current); }
+    h256 currentHeaderHash() { return m_current.header; }
+    bool current() { return static_cast<bool>(m_current); }
 
 private:
+    void disconnect_finalize();
+    void enqueue_response_plea();
+    std::chrono::milliseconds dequeue_response_plea();
+    void clear_response_pleas();
+    void resolve_handler(
+        const boost::system::error_code& ec, boost::asio::ip::tcp::resolver::iterator i);
+    void start_connect();
+    void connect_handler(const boost::system::error_code& ec);
+    void workloop_timer_elapsed(const boost::system::error_code& ec);
 
-	void resolve_handler(const boost::system::error_code& ec, boost::asio::ip::tcp::resolver::iterator i);
-	void connect_handler(const boost::system::error_code& ec, boost::asio::ip::tcp::resolver::iterator i);
-	void work_timeout_handler(const boost::system::error_code& ec);
-	void response_timeout_handler(const boost::system::error_code& ec);
-	void hashrate_event_handler(const boost::system::error_code& ec);
+    void processResponse(Json::Value& responseObject);
+    std::string processError(Json::Value& erroresponseObject);
+    void processExtranonce(std::string& enonce);
 
-	void reset_work_timeout();
-	void readline();
-	void handleResponse(const boost::system::error_code& ec);
-	void handleHashrateResponse(const boost::system::error_code& ec);
-	void readResponse(const boost::system::error_code& ec, std::size_t bytes_transferred);
-	void processReponse(Json::Value& responseObject);
-	void async_write_with_response();
+    void recvSocketData();
+    void onRecvSocketDataCompleted(
+        const boost::system::error_code& ec, std::size_t bytes_transferred);
+    void send(Json::Value const& jReq);
+    void sendSocketData();
+    void onSendSocketDataCompleted(const boost::system::error_code& ec);
+    void onSSLShutdownCompleted(const boost::system::error_code& ec);
 
-	PoolConnection m_connection;
+    string m_user;    // Only user part
+    string m_worker;  // eth-proxy only; No ! It's for all !!!
 
-	string m_worker; // eth-proxy only;
+    std::atomic<bool> m_disconnecting = {false};
+    std::atomic<bool> m_connecting = {false};
+    std::atomic<bool> m_authpending = {false};
 
-	bool m_authorized;
-	std::atomic<bool> m_connected = {false};
+    // seconds to trigger a work_timeout (overwritten in constructor)
+    int m_worktimeout;
 
-	int m_worktimeout = 60;
+    // seconds timeout for responses and connection (overwritten in constructor)
+    int m_responsetimeout;
 
-	std::mutex x_pending;
-	int m_pending;
+    // default interval for workloop timer (milliseconds)
+    int m_workloop_interval = 1000;
 
-	WorkPackage m_current;
+    WorkPackage m_current;
+    std::chrono::time_point<std::chrono::steady_clock> m_current_timestamp;
 
-	bool m_stale = false;
+    boost::asio::io_service& m_io_service;  // The IO service reference passed in the constructor
+    boost::asio::io_service::strand m_io_strand;
+    boost::asio::ip::tcp::socket* m_socket;
+    std::string m_message;  // The internal message string buffer
+    bool m_newjobprocessed = false;
 
-	std::thread m_serviceThread;  ///< The IO service thread.
-	boost::asio::io_service m_io_service;
-	boost::asio::ip::tcp::socket *m_socket;
-	boost::asio::ssl::stream<boost::asio::ip::tcp::socket> *m_securesocket;
+    // Use shared ptrs to avoid crashes due to async_writes
+    // see
+    // https://stackoverflow.com/questions/41526553/can-async-write-cause-segmentation-fault-when-this-is-deleted
+    std::shared_ptr<boost::asio::ssl::stream<boost::asio::ip::tcp::socket>> m_securesocket;
+    std::shared_ptr<boost::asio::ip::tcp::socket> m_nonsecuresocket;
 
-	boost::asio::streambuf m_requestBuffer;
-	boost::asio::streambuf m_responseBuffer;
+    boost::asio::streambuf m_sendBuffer;
+    boost::asio::streambuf m_recvBuffer;
+    Json::StreamWriterBuilder m_jSwBuilder;
 
-	boost::asio::deadline_timer m_worktimer;
-	boost::asio::deadline_timer m_responsetimer;
-	boost::asio::deadline_timer m_hashrate_event;
-	bool m_response_pending = false;
+    boost::asio::deadline_timer m_workloop_timer;
 
-	boost::asio::ip::tcp::resolver m_resolver;
+    std::atomic<int> m_response_pleas_count = {0};
+    std::atomic<std::chrono::steady_clock::duration> m_response_plea_older;
+    boost::lockfree::queue<std::chrono::steady_clock::time_point> m_response_plea_times;
 
-	string m_email;
-	string m_rate;
+    std::atomic<bool> m_txPending = {false};
+    boost::lockfree::queue<std::string*> m_txQueue;
 
-	double m_nextWorkDifficulty;
+    boost::asio::ip::tcp::resolver m_resolver;
+    std::queue<boost::asio::ip::basic_endpoint<boost::asio::ip::tcp>> m_endpoints;
 
-	h64 m_extraNonce;
-	int m_extraNonceHexSize;
+    h256 m_nextWorkBoundary =
+        h256("0x00000000ffff0000000000000000000000000000000000000000000000000000");
 
-	bool m_submit_hashrate = false;
-	string m_submit_hashrate_id;
+    uint64_t m_extraNonce = 0;
+    unsigned int m_extraNonceSizeBytes = 0;
 
-	void processExtranonce(std::string& enonce);
+    unsigned m_solution_submitted_max_id;  // maximum json id we used to send a solution
 
-	bool m_linkdown = true;
+    ///@brief Auxiliary function to make verbose_verification objects.
+    template <typename Verifier>
+    verbose_verification<Verifier> make_verbose_verification(Verifier verifier)
+    {
+        return verbose_verification<Verifier>(verifier);
+    }
 };
