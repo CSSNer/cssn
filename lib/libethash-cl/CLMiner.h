@@ -1,7 +1,4 @@
-/// OpenCL miner implementation.
-///
-/// @file
-/// @copyright GNU General Public License
+
 
 #pragma once
 
